@@ -346,7 +346,8 @@
             "projen",
             "ts-jest",
             "ts-node",
-            "typescript"
+            "typescript",
+            "@aws-sdk/client-athena"
           ]
         },
         {

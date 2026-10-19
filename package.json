@@ -1,5 +1,6 @@
 {
   "name": "athena-query-result-value-converter",
+  "description": "A small TypeScript library that converts Amazon Athena query result cell values using ColumnInfo types from @aws-sdk/client-athena.",
   "repository": {
     "type": "git",
     "url": "https://github.com/gammarers-aws-sdk-extensions/athena-query-result-value-converter.git"
@@ -49,6 +50,18 @@
     "ts-node": "^10.9.2",
     "typescript": "6.0.x"
   },
+  "dependencies": {
+    "@aws-sdk/client-athena": "^3.983.0"
+  },
+  "keywords": [
+    "athena",
+    "aws",
+    "aws-sdk",
+    "converter",
+    "query",
+    "result",
+    "value"
+  ],
   "engines": {
     "node": ">= 20.0.0"
   },
