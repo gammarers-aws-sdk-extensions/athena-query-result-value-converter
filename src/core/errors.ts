@@ -80,3 +80,63 @@ export class AthenaQueryResultValueConverterUnparseableValueError extends Athena
     this.rowIndex = rowIndex;
   }
 }
+
+/**
+ * Builds the message for {@link AthenaQueryResultValueConverterColumnCountError}.
+ *
+ * @param rowIndex - Zero-based index in the `Row[]` passed to the converter.
+ * @param expected - Column count from `ColumnInfo[]`.
+ * @param actual - Cell count on that row.
+ * @returns A human-readable error message.
+ */
+const describeColumnCount = (rowIndex: number, expected: number, actual: number): string => {
+  return `Expected ${expected} cells at row index ${rowIndex} but received ${actual}`;
+};
+
+/**
+ * Thrown when a result row does not have one cell per column.
+ *
+ * The header row is included. `GetQueryResults` pages are not realigned.
+ */
+export class AthenaQueryResultValueConverterColumnCountError extends AthenaQueryResultValueConverterError {
+  override readonly name: string = 'AthenaQueryResultValueConverterColumnCountError';
+  readonly code = 'column-count' as const;
+
+  /**
+   * Zero-based index in the `Row[]` passed to the converter.
+   */
+  readonly rowIndex: number;
+
+  /**
+   * Column count from the supplied `ColumnInfo[]`.
+   */
+  readonly expected: number;
+
+  /**
+   * Cell count on the row that failed the check.
+   */
+  readonly actual: number;
+
+  constructor(rowIndex: number, expected: number, actual: number) {
+    super(describeColumnCount(rowIndex, expected, actual));
+    Object.setPrototypeOf(this, AthenaQueryResultValueConverterColumnCountError.prototype);
+    this.rowIndex = rowIndex;
+    this.expected = expected;
+    this.actual = actual;
+  }
+}
+
+/**
+ * Thrown when a caller passes an option this package cannot use.
+ *
+ * This is distinct from a cell that does not match its column type.
+ */
+export class AthenaQueryResultValueConverterArgumentError extends AthenaQueryResultValueConverterError {
+  override readonly name: string = 'AthenaQueryResultValueConverterArgumentError';
+  readonly code = 'argument' as const;
+
+  constructor(message: string) {
+    super(message);
+    Object.setPrototypeOf(this, AthenaQueryResultValueConverterArgumentError.prototype);
+  }
+}
