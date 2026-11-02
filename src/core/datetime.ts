@@ -15,6 +15,10 @@ const MILLISECOND_PRECISION = 3;
 const UTC_ZONE = 'UTC';
 const DATE_VALUE_INSTANT = 'instant';
 const DATE_VALUE_STRING = 'string';
+const TIMESTAMP_ZONE_ZONED = 'zoned';
+const TIMESTAMP_ZONE_SESSION = 'session';
+const TIMESTAMP_AS_DATE = 'date';
+const TIMESTAMP_AS_TEXT = 'text';
 const MAX_OFFSET_HOURS = 18;
 const MS_PER_SECOND = 1000;
 const MS_PER_MINUTE = 60 * MS_PER_SECOND;
@@ -56,10 +60,25 @@ export type ToDateOptions = {
 };
 
 /**
+ * Where a timestamp takes its time zone from.
+ *
+ * - `'zoned'`: the cell is `timestamp with time zone` and carries its own suffix
+ * - `'session'`: the cell is a zone-less timestamp and uses the session zone
+ */
+export type TimestampZoneSource = typeof TIMESTAMP_ZONE_ZONED | typeof TIMESTAMP_ZONE_SESSION;
+
+/**
+ * Whether a timestamp that fits its type becomes a {@link Date} or stays text.
+ *
+ * `'text'` is for precision above milliseconds, which a `Date` would truncate.
+ */
+type TimestampRepresentation = typeof TIMESTAMP_AS_DATE | typeof TIMESTAMP_AS_TEXT;
+
+/**
  * Timestamp type after the Athena type string has been normalized.
  */
 export type AthenaTimestampType = {
-  readonly withTimeZone: boolean;
+  readonly zoneSource: TimestampZoneSource;
   readonly typePrecision: number | undefined;
 };
 
@@ -399,14 +418,14 @@ const instantToDate = (epochMs: number, original: string): Date | string => {
  * @param clock - Validated wall clock.
  * @param zone - Offset or IANA zone that belongs to this literal.
  * @param original - Trimmed Athena literal.
- * @param keepText - `true` when the declared precision does not fit in a `Date`.
+ * @param representation - `'date'` when the instant fits in a {@link Date}. `'text'` when precision does not.
  * @returns A {@link Date}, the original text, or `null` when the local time does not exist.
  */
 const clockToValue = (
   clock: ClockParts,
   zone: ZoneBinding,
   original: string,
-  keepText: boolean,
+  representation: TimestampRepresentation,
 ): Date | string | null => {
   const epochMs = zone.kind === 'offset'
     ? utcFromParts(
@@ -420,7 +439,7 @@ const clockToValue = (
     ) - zone.offsetMs
     : wallTimeToUtc(clock, zone.timeZone);
   if (epochMs == null) return null;
-  if (keepText) return original;
+  if (representation === TIMESTAMP_AS_TEXT) return original;
   return instantToDate(epochMs, original);
 };
 
@@ -440,12 +459,12 @@ const fractionToMillisecond = (fraction: string | undefined): number => {
  *
  * @param match - Groups from {@link TIMESTAMP_PATTERN} or {@link TIMESTAMP_WITH_ZONE_PATTERN}.
  * @param precision - Declared timestamp precision.
- * @returns The clock and whether the value must stay text. `undefined` when the literal does not match the type.
+ * @returns The clock and how to represent a valid value. `undefined` when the literal does not match the type.
  */
 const readTimestampClock = (
   match: RegExpExecArray,
   precision: number,
-): { readonly clock: ClockParts; readonly keepText: boolean } | undefined => {
+): { readonly clock: ClockParts; readonly representation: TimestampRepresentation } | undefined => {
   const fraction = match[7];
   const fractionDigits = fraction?.length ?? 0;
   if (fractionDigits > precision) return undefined;
@@ -469,7 +488,7 @@ const readTimestampClock = (
       second,
       millisecond: fractionDigits > MILLISECOND_PRECISION ? 0 : fractionToMillisecond(fraction),
     },
-    keepText: precision > MILLISECOND_PRECISION,
+    representation: precision > MILLISECOND_PRECISION ? TIMESTAMP_AS_TEXT : TIMESTAMP_AS_DATE,
   };
 };
 
@@ -491,7 +510,7 @@ const toSessionTimestamp = (
 
   const read = readTimestampClock(match, precision);
   if (read == null) return null;
-  return clockToValue(read.clock, { kind: 'iana', timeZone: sessionTimeZone }, trimmed, read.keepText);
+  return clockToValue(read.clock, { kind: 'iana', timeZone: sessionTimeZone }, trimmed, read.representation);
 };
 
 /**
@@ -510,7 +529,7 @@ const toZonedTimestamp = (trimmed: string, precision: number): Date | string | n
 
   const read = readTimestampClock(match, precision);
   if (read == null) return null;
-  return clockToValue(read.clock, zone, trimmed, read.keepText);
+  return clockToValue(read.clock, zone, trimmed, read.representation);
 };
 
 /**
@@ -521,18 +540,18 @@ const toZonedTimestamp = (trimmed: string, precision: number): Date | string | n
  * @param value - Raw cell text.
  * @param precision - Declared precision. Above 3, a valid literal stays text.
  * @param sessionTimeZone - IANA zone for a timestamp without a zone suffix.
- * @param withTimeZone - `true` when the column is `timestamp with time zone`.
+ * @param zoneSource - `'zoned'` reads the suffix on the value. `'session'` uses `sessionTimeZone`.
  * @returns A {@link Date}, preserved text, or `null` when the cell does not match the column.
  */
 export const toAthenaTimestamp = (
   value: string,
   precision: number,
   sessionTimeZone: string,
-  withTimeZone: boolean,
+  zoneSource: TimestampZoneSource,
 ): Date | string | null => {
   const trimmed = value.trim();
   if (trimmed.length === 0) return null;
-  if (withTimeZone) return toZonedTimestamp(trimmed, precision);
+  if (zoneSource === TIMESTAMP_ZONE_ZONED) return toZonedTimestamp(trimmed, precision);
   return toSessionTimestamp(trimmed, precision, sessionTimeZone);
 };
 
@@ -583,13 +602,13 @@ export const toAthenaTime = (value: string, precision: number): string | null =>
  * Reads `timestamp` or `timestamp(p)`, with or without `with time zone`.
  *
  * @param normalizedType - Lowercased Athena type string.
- * @returns The type's zone flag and the precision written on the type, if any.
+ * @returns The zone source and the precision written on the type, if any.
  */
 export const matchTimestampType = (normalizedType: string): AthenaTimestampType | undefined => {
   const zoned = TIMESTAMP_WITH_TIME_ZONE_TYPE_PATTERN.exec(normalizedType);
   if (zoned != null) {
     return {
-      withTimeZone: true,
+      zoneSource: TIMESTAMP_ZONE_ZONED,
       typePrecision: zoned[1] == null ? undefined : Number(zoned[1]),
     };
   }
@@ -597,7 +616,7 @@ export const matchTimestampType = (normalizedType: string): AthenaTimestampType 
   const plain = TIMESTAMP_TYPE_PATTERN.exec(normalizedType);
   if (plain == null) return undefined;
   return {
-    withTimeZone: false,
+    zoneSource: TIMESTAMP_ZONE_SESSION,
     typePrecision: plain[1] == null ? undefined : Number(plain[1]),
   };
 };

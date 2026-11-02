@@ -30,6 +30,11 @@ export type AthenaTypedValue = string | number | boolean | Date | null;
  */
 export type UnparseableValueBehavior = 'keep' | 'null' | 'throw';
 
+/**
+ * Cell text kept when conversion fails and the caller does not choose another behavior.
+ */
+export const DEFAULT_UNPARSEABLE_VALUE_BEHAVIOR: UnparseableValueBehavior = 'keep';
+
 const TYPE_TINYINT = 'tinyint' as const;
 const TYPE_SMALLINT = 'smallint' as const;
 const TYPE_INT = 'int' as const;
@@ -397,7 +402,7 @@ export const convert = (
   const timestampType = matchTimestampType(normalized);
   if (timestampType != null) {
     const precision = resolveTemporalPrecision(column, timestampType.typePrecision);
-    const parsed = toAthenaTimestamp(value, precision, context.timeZone, timestampType.withTimeZone);
+    const parsed = toAthenaTimestamp(value, precision, context.timeZone, timestampType.zoneSource);
     if (parsed != null) return parsed;
     return reject();
   }
@@ -436,10 +441,11 @@ export const isStringLikeType = (type: string | undefined): boolean => {
 };
 
 /**
- * Returns whether header-row detection should treat the type as numeric.
+ * Returns whether the normalized type is numeric.
  *
- * This check is looser than typed row conversion. Detection only needs to know
- * whether a header cell is unlikely to be data.
+ * This check is looser than typed row conversion. {@link isParseableAsType} uses it
+ * to decide whether the cell text looks like a number. Which row is a header is
+ * chosen with `headerRow` on `convertResultSet`.
  *
  * @param type - Normalized Athena column type.
  * @returns `true` for integer, floating, and decimal types.
@@ -491,7 +497,7 @@ export const isParseableAsType = (value: string, type: string | undefined): bool
   const timestampType = matchTimestampType(normalized);
   if (timestampType != null) {
     const precision = timestampType.typePrecision ?? DEFAULT_TEMPORAL_PRECISION;
-    return toAthenaTimestamp(value, precision, DEFAULT_TIME_ZONE, timestampType.withTimeZone) != null;
+    return toAthenaTimestamp(value, precision, DEFAULT_TIME_ZONE, timestampType.zoneSource) != null;
   }
   if (normalized === TYPE_DATE) {
     return toAthenaDate(value, 'instant') != null;

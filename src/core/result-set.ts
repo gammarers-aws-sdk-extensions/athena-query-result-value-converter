@@ -5,6 +5,7 @@ import {
 } from './errors';
 import {
   convert,
+  DEFAULT_UNPARSEABLE_VALUE_BEHAVIOR,
   resolveTemporalOptions,
   type AthenaTypedValue,
   type DateValueKind,
@@ -13,7 +14,6 @@ import {
 
 const HEADER_ROW_PRESENT = 'present' as const;
 const HEADER_ROW_ABSENT = 'absent' as const;
-const DEFAULT_UNPARSEABLE_VALUE_BEHAVIOR: UnparseableValueBehavior = 'keep';
 
 /**
  * Whether the `Row[]` for this page still starts with column names.

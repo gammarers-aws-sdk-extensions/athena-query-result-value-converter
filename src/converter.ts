@@ -10,6 +10,7 @@ import {
   convert as convertImpl,
   isParseableAsType,
   isStringLikeType,
+  DEFAULT_UNPARSEABLE_VALUE_BEHAVIOR,
   resolveTemporalOptions,
   toBoolean,
   toDate,
@@ -21,11 +22,6 @@ import {
 
 export type { AthenaTypedValue, DateValueKind, ToDateOptions, UnparseableValueBehavior } from './core/typed-value';
 export type { AthenaConvertedCell, AthenaConvertedRow, ConvertResultSetOptions, HeaderRowPresence };
-
-/**
- * Default behavior when a cell cannot be converted for its column type.
- */
-const DEFAULT_UNPARSEABLE_VALUE_BEHAVIOR: UnparseableValueBehavior = 'keep';
 
 /**
  * Options for {@link AthenaQueryResultValueConverter.convert}.
