@@ -105,6 +105,11 @@ describe('AthenaQueryResultValueConverter.convertResultSet', () => {
     expect(convertResultSet(columns, [], { headerRow: 'absent' })).toEqual([]);
   });
 
+  it('should throw when a row has no Data array', () => {
+    expect(() => convertResultSet(columns, [{}], { headerRow: 'absent' }))
+      .toThrow('Expected 3 cells at row index 0 but received 0');
+  });
+
   it('should throw when a data row or the header row has the wrong cell count', () => {
     const short: Row = { Data: [{ VarCharValue: '7' }] };
 
