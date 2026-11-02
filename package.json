@@ -1,6 +1,6 @@
 {
   "name": "athena-query-result-value-converter",
-  "description": "A small TypeScript library that converts Amazon Athena query result cell values using ColumnInfo types from @aws-sdk/client-athena.",
+  "description": "A small TypeScript library that converts Amazon Athena query result cells and rows using ColumnInfo types from @aws-sdk/client-athena.",
   "repository": {
     "type": "git",
     "url": "https://github.com/gammarers-aws-sdk-extensions/athena-query-result-value-converter.git"
