@@ -1,5 +1,20 @@
 import type { ColumnInfo } from '@aws-sdk/client-athena';
+import {
+  DEFAULT_TEMPORAL_PRECISION,
+  DEFAULT_TIME_ZONE,
+  matchTimeType,
+  matchTimestampType,
+  resolveTemporalOptions,
+  toAthenaDate,
+  toAthenaTime,
+  toAthenaTimestamp,
+  toDate,
+  type TemporalOptions,
+} from './datetime';
 import { AthenaQueryResultValueConverterUnparseableValueError } from './errors';
+
+export type { DateValueKind, TemporalOptions, ToDateOptions } from './datetime';
+export { resolveTemporalOptions, toDate };
 
 /**
  * A parsed Athena cell value that has been converted based on the column type.
@@ -30,10 +45,6 @@ const TYPE_VARCHAR_PREFIX = 'varchar' as const;
 const TYPE_CHAR_PREFIX = 'char' as const;
 const TYPE_VARBINARY_PREFIX = 'varbinary' as const;
 const TYPE_DATE = 'date' as const;
-const TYPE_TIMESTAMP = 'timestamp' as const;
-const TYPE_TIMESTAMP_PREFIX = 'timestamp ' as const;
-const TYPE_TIME = 'time' as const;
-const TYPE_TIME_PREFIX = 'time ' as const;
 const DECIMAL_TYPE_PREFIX = 'decimal(' as const;
 
 /**
@@ -198,19 +209,17 @@ export const toBoolean = (value: string | null): boolean | null => {
 };
 
 /**
- * Safely converts a string value to a {@link Date}.
+ * Prefers `ColumnInfo.Precision`, then `(p)` on the type, then millisecond precision.
  *
- * Uses {@link Date.parse} and returns `null` when parsing fails.
- *
- * @param value - Raw Athena cell value.
- * @returns A {@link Date}, or `null` when conversion is not possible.
+ * @param column - Column metadata. `Precision` is used for timestamp and time columns.
+ * @param typePrecision - Precision parsed from `timestamp(p)` or `time(p)`.
+ * @returns The precision that limits fractional digits.
  */
-export const toDate = (value: string | null): Date | null => {
-  if (value == null) return null;
-  const trimmed = value.trim();
-  if (trimmed.length === 0) return null;
-  const ms = Date.parse(trimmed);
-  return Number.isNaN(ms) ? null : new Date(ms);
+const resolveTemporalPrecision = (
+  column: ColumnInfo | undefined,
+  typePrecision: number | undefined,
+): number => {
+  return readNonNegativeInteger(column?.Precision) ?? typePrecision ?? DEFAULT_TEMPORAL_PRECISION;
 };
 
 /**
@@ -321,13 +330,17 @@ const unparseableTypedValue = (
  * Converts a raw Athena cell using column metadata.
  *
  * `bigint` and `decimal` stay strings. `Number()` cannot represent every
- * signed 64-bit integer, and it drops trailing decimal scale.
+ * signed 64-bit integer, and it drops trailing decimal scale. A `timestamp` whose
+ * precision does not fit in a {@link Date} stays a string as well. `time` stays a
+ * string because it has no date. Timestamp text is an Athena literal in
+ * `context.timeZone` (default UTC), not a value for {@link Date.parse}.
  *
  * @param value - Raw `VarCharValue` (or `null` when missing).
  * @param columnName - Header name used when conversion fails.
  * @param column - Column metadata for this cell.
  * @param unparseable - Whether to keep the original string, return `null`, or throw.
  * @param rowIndex - Optional zero-based row index included when throwing.
+ * @param context - Session time zone and date representation. Defaults are UTC and `'instant'`.
  * @returns A typed value, or the original string / `null` when unparseable.
  * @throws {@link AthenaQueryResultValueConverterUnparseableValueError} When `unparseable` is `'throw'` and the cell
  * does not match its column type.
@@ -338,6 +351,7 @@ export const convert = (
   column: ColumnInfo | undefined,
   unparseable: UnparseableValueBehavior,
   rowIndex?: number,
+  context: TemporalOptions = resolveTemporalOptions({}),
 ): AthenaTypedValue => {
   if (value == null) return null;
 
@@ -380,8 +394,24 @@ export const convert = (
     return reject();
   }
 
-  if (isDateTimeLikeType(normalized)) {
-    const parsed = toDate(value);
+  const timestampType = matchTimestampType(normalized);
+  if (timestampType != null) {
+    const precision = resolveTemporalPrecision(column, timestampType.typePrecision);
+    const parsed = toAthenaTimestamp(value, precision, context.timeZone, timestampType.withTimeZone);
+    if (parsed != null) return parsed;
+    return reject();
+  }
+
+  if (normalized === TYPE_DATE) {
+    const parsed = toAthenaDate(value, context.dateValue);
+    if (parsed != null) return parsed;
+    return reject();
+  }
+
+  const timeType = matchTimeType(normalized);
+  if (timeType != null) {
+    const precision = resolveTemporalPrecision(column, timeType.typePrecision);
+    const parsed = toAthenaTime(value, precision);
     if (parsed != null) return parsed;
     return reject();
   }
@@ -439,31 +469,15 @@ const isBooleanLikeType = (type: string | undefined): boolean => {
 };
 
 /**
- * Returns whether the Athena type is treated as a date/time-like type.
+ * Returns whether a string value matches the Athena literal for the column type.
  *
- * @param type - Raw or normalized Athena column type.
- * @returns `true` for date/timestamp/time-like types.
- */
-const isDateTimeLikeType = (type: string | undefined): boolean => {
-  const normalized = normalizeType(type);
-  return (
-    normalized === TYPE_DATE ||
-    normalized === TYPE_TIMESTAMP ||
-    normalized.startsWith(TYPE_TIMESTAMP_PREFIX) ||
-    normalized === TYPE_TIME ||
-    normalized.startsWith(TYPE_TIME_PREFIX)
-  );
-};
-
-/**
- * Returns whether a string value looks parseable for the given Athena type.
+ * Date and time checks use the same literals as {@link convert}. A result page's
+ * header row is selected with `headerRow` on `convertResultSet`, not by this predicate.
+ * Timestamp precision comes from the type string. `ColumnInfo.Precision` is applied by {@link convert}.
  *
- * Used for strategies that decide whether a header-looking row is unlikely to
- * be valid data.
- *
- * @param value - Cell value from the first row.
+ * @param value - Cell value from a row.
  * @param type - Athena column type for that cell.
- * @returns `true` when `value` appears valid for `type`.
+ * @returns `true` when `value` is acceptable for `type`.
  */
 export const isParseableAsType = (value: string, type: string | undefined): boolean => {
   const normalized = normalizeType(type);
@@ -473,10 +487,19 @@ export const isParseableAsType = (value: string, type: string | undefined): bool
   if (isBooleanLikeType(normalized)) {
     return value === 'true' || value === 'false';
   }
-  if (isDateTimeLikeType(normalized)) {
-    // Athena typically returns ISO-like strings for date/time types.
-    // Keep this strict so column names are not classified as data.
-    return !Number.isNaN(Date.parse(value));
+
+  const timestampType = matchTimestampType(normalized);
+  if (timestampType != null) {
+    const precision = timestampType.typePrecision ?? DEFAULT_TEMPORAL_PRECISION;
+    return toAthenaTimestamp(value, precision, DEFAULT_TIME_ZONE, timestampType.withTimeZone) != null;
+  }
+  if (normalized === TYPE_DATE) {
+    return toAthenaDate(value, 'instant') != null;
+  }
+  const timeType = matchTimeType(normalized);
+  if (timeType != null) {
+    const precision = timeType.typePrecision ?? DEFAULT_TEMPORAL_PRECISION;
+    return toAthenaTime(value, precision) != null;
   }
   // Complex and string-like types are treated as parseable.
   return true;

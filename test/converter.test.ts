@@ -1,6 +1,7 @@
 import type { ColumnInfo } from '@aws-sdk/client-athena';
 import {
   AthenaQueryResultValueConverter,
+  AthenaQueryResultValueConverterArgumentError,
   AthenaQueryResultValueConverterError,
   AthenaQueryResultValueConverterUnparseableValueError,
 } from '../src';
@@ -53,10 +54,37 @@ describe('value conversion utilities', () => {
     expect(toDate('not-a-date')).toBeNull();
   });
 
-  it('toDate should parse ISO-like timestamps', () => {
-    const d = toDate('2026-01-01T00:00:00.000Z');
+  it('toDate should parse Athena timestamps as UTC by default', () => {
+    const d = toDate('2026-01-01 00:00:00.000');
     expect(d).not.toBeNull();
     expect(d!.toISOString()).toBe('2026-01-01T00:00:00.000Z');
+  });
+
+  it('toDate should apply an IANA zone and prefer a suffix on the value', () => {
+    expect(toDate('2026-01-01 00:00:00.000', { timeZone: 'Asia/Tokyo' })!.toISOString())
+      .toBe('2025-12-31T15:00:00.000Z');
+    expect(toDate('2026-01-01 00:00:00.000 Asia/Tokyo')!.toISOString())
+      .toBe('2025-12-31T15:00:00.000Z');
+    expect(toDate('2026-01-01 00:00:00.123 +09:00')!.toISOString())
+      .toBe('2025-12-31T15:00:00.123Z');
+  });
+
+  it('toDate should keep a date-only literal at UTC midnight', () => {
+    expect(toDate('2026-01-01', { timeZone: 'Asia/Tokyo' })!.toISOString())
+      .toBe('2026-01-01T00:00:00.000Z');
+  });
+
+  it('toDate should reject non-Athena text and fractions finer than milliseconds', () => {
+    expect(toDate('2026-01-01T00:00:00.000Z')).toBeNull();
+    expect(toDate('January 1, 2026')).toBeNull();
+    expect(toDate('2026')).toBeNull();
+    expect(toDate('2026-01-01 00:00:00.123456')).toBeNull();
+    expect(toDate('12:00:00.000')).toBeNull();
+  });
+
+  it('toDate should throw when the session time zone is not an IANA name', () => {
+    expect(() => toDate('2026-01-01 00:00:00.000', { timeZone: 'Not/AZone' }))
+      .toThrow(AthenaQueryResultValueConverterArgumentError);
   });
 });
 
@@ -73,7 +101,7 @@ describe('AthenaQueryResultValueConverter.convert', () => {
     expect(convert('true', 'is_active', makeColumn('boolean'))).toBe(true);
 
     const createdAt = convert(
-      '2026-01-01T00:00:00.000Z',
+      '2026-01-01 00:00:00.000',
       'created_at',
       makeColumn('timestamp'),
     );
@@ -257,6 +285,155 @@ describe('AthenaQueryResultValueConverter.convert', () => {
   });
 });
 
+describe('Athena date and time literals', () => {
+  const expectInstant = (value: unknown, iso: string): void => {
+    expect(value).toBeInstanceOf(Date);
+    expect((value as Date).toISOString()).toBe(iso);
+  };
+
+  it('should read a zone-less timestamp in the session time zone', () => {
+    expectInstant(
+      convert('2026-01-01 00:00:00.000', 'created_at', makeColumn('timestamp'), {
+        timeZone: 'Asia/Tokyo',
+      }),
+      '2025-12-31T15:00:00.000Z',
+    );
+    expectInstant(
+      convert('  2026-01-01 00:00:00.1  ', 'created_at', makeColumn('timestamp(3)')),
+      '2026-01-01T00:00:00.100Z',
+    );
+  });
+
+  it.each([
+    ['2026-01-01 00:00:00.000 UTC', '2026-01-01T00:00:00.000Z'],
+    ['2026-01-01 00:00:00.000 +09:00', '2025-12-31T15:00:00.000Z'],
+    ['2026-01-01 00:00:00.000 +0900', '2025-12-31T15:00:00.000Z'],
+    ['2026-01-01 00:00:00.000 -05:30', '2026-01-01T05:30:00.000Z'],
+    ['2026-01-01 00:00:00.000 Asia/Tokyo', '2025-12-31T15:00:00.000Z'],
+    ['2026-11-01 01:30:00.000 America/New_York', '2026-11-01T05:30:00.000Z'],
+    ['2026-10-25 02:30:00.000 Europe/Paris', '2026-10-25T00:30:00.000Z'],
+    ['2026-04-05 01:30:00.000 Australia/Lord_Howe', '2026-04-04T14:30:00.000Z'],
+  ] as const)('should convert timestamp with time zone %s to %s', (raw, iso) => {
+    expectInstant(convert(raw, 'created_at', makeColumn('timestamp with time zone')), iso);
+  });
+
+  it('should use the earlier instant when the session zone repeats a local time', () => {
+    expectInstant(
+      convert('2026-10-25 02:30:00.000', 'created_at', makeColumn('timestamp'), {
+        timeZone: 'Europe/Paris',
+      }),
+      '2026-10-25T00:30:00.000Z',
+    );
+  });
+
+  it('should keep a timestamp that skips a local hour', () => {
+    const raw = '2026-03-08 02:30:00.000 America/New_York';
+    expect(convert(raw, 'created_at', makeColumn('timestamp with time zone'))).toBe(raw);
+  });
+
+  it('should keep timestamps whose precision does not fit in a Date', () => {
+    expect(convert('2026-01-01 00:00:00.123456', 'created_at', makeColumn('timestamp(6)')))
+      .toBe('2026-01-01 00:00:00.123456');
+    expect(convert('2026-01-01 00:00:00.000', 'created_at', makeColumn('timestamp(6)')))
+      .toBe('2026-01-01 00:00:00.000');
+    expect(
+      convert('2026-01-01 00:00:00.123456 UTC', 'created_at', makeColumn('timestamp(6) with time zone')),
+    ).toBe('2026-01-01 00:00:00.123456 UTC');
+    expect(
+      convert('2026-01-01 00:00:00.000', 'created_at', makeColumn('timestamp', { precision: 6 })),
+    ).toBe('2026-01-01 00:00:00.000');
+  });
+
+  it('should not throw when a fine timestamp is valid text', () => {
+    expect(
+      convert('2026-01-01 00:00:00.123456', 'created_at', makeColumn('timestamp(6)'), {
+        unparseableValueBehavior: 'throw',
+      }),
+    ).toBe('2026-01-01 00:00:00.123456');
+  });
+
+  it('should prefer ColumnInfo.Precision over timestamp(p) on the type', () => {
+    expectInstant(
+      convert('2026-01-01 00:00:00.123', 'created_at', makeColumn('timestamp(6)', { precision: 3 })),
+      '2026-01-01T00:00:00.123Z',
+    );
+    expect(
+      convert('2026-01-01 00:00:00.123456', 'created_at', makeColumn('timestamp(6)', { precision: -1 }), {
+        unparseableValueBehavior: 'throw',
+      }),
+    ).toBe('2026-01-01 00:00:00.123456');
+  });
+
+  it.each([
+    '2026',
+    'January 1, 2026',
+    '01/02/2026',
+    '2026-01-01T00:00:00.000Z',
+    '2026-02-31 00:00:00.000',
+    '2026-01-01 00:00:00.123456',
+    '2026-01-01 00:00:00.000 Asia/Tokyo',
+  ] as const)('should keep non-Athena or over-precise timestamp %s', (raw) => {
+    expect(convert(raw, 'created_at', makeColumn('timestamp'))).toBe(raw);
+  });
+
+  it('should throw when a timestamp fraction exceeds the declared precision', () => {
+    expect(() =>
+      convert('2026-01-01 00:00:00.123456', 'created_at', makeColumn('timestamp(3)'), {
+        unparseableValueBehavior: 'throw',
+      }),
+    ).toThrow(AthenaQueryResultValueConverterUnparseableValueError);
+  });
+
+  it('should return a date as UTC midnight or as YYYY-MM-DD text', () => {
+    expectInstant(convert('2026-01-01', 'birth_date', makeColumn('date')), '2026-01-01T00:00:00.000Z');
+    expectInstant(convert('0001-01-01', 'birth_date', makeColumn('date')), '0001-01-01T00:00:00.000Z');
+    expectInstant(convert('0000-02-29', 'birth_date', makeColumn('date')), '0000-02-29T00:00:00.000Z');
+    expect(convert('2026-01-01', 'birth_date', makeColumn('date'), { dateValue: 'string' })).toBe('2026-01-01');
+    expect(convert('2026-02-31', 'birth_date', makeColumn('date'))).toBe('2026-02-31');
+    expect(convert('0000-02-30', 'birth_date', makeColumn('date'))).toBe('0000-02-30');
+    expect(convert('01/02/2026', 'birth_date', makeColumn('date'), { dateValue: 'string' })).toBe('01/02/2026');
+  });
+
+  it('should keep years 0 through 99 instead of shifting them into the 1900s', () => {
+    expectInstant(
+      convert('0099-01-01 00:00:00.000', 'created_at', makeColumn('timestamp')),
+      '0099-01-01T00:00:00.000Z',
+    );
+    expectInstant(
+      convert('0001-01-01 00:00:00.000 +09:00', 'created_at', makeColumn('timestamp with time zone')),
+      '0000-12-31T15:00:00.000Z',
+    );
+  });
+
+  it('should keep time and time(p) as text', () => {
+    expect(
+      convert('12:34:56.789', 'started_at', makeColumn('time'), { unparseableValueBehavior: 'throw' }),
+    ).toBe('12:34:56.789');
+    expect(
+      convert('12:34:56.789', 'started_at', makeColumn('time(3)'), { unparseableValueBehavior: 'throw' }),
+    ).toBe('12:34:56.789');
+    expect(convert('12:34:56', 'started_at', makeColumn('time(0)'))).toBe('12:34:56');
+    expect(convert('12:34:56.123456', 'started_at', makeColumn('time(6)'))).toBe('12:34:56.123456');
+    expect(convert('12:34:56.1', 'started_at', makeColumn('time(0)'))).toBe('12:34:56.1');
+    expect(() =>
+      convert('24:00:00', 'started_at', makeColumn('time'), { unparseableValueBehavior: 'throw' }),
+    ).toThrow(AthenaQueryResultValueConverterUnparseableValueError);
+    expect(convert('12:00:00.000 UTC', 'started_at', makeColumn('time with time zone')))
+      .toBe('12:00:00.000 UTC');
+  });
+
+  it('should throw when the session time zone or dateValue is unusable', () => {
+    expect(() =>
+      convert('1', 'n', makeColumn('integer'), { timeZone: 'Not/AZone' }),
+    ).toThrow(AthenaQueryResultValueConverterArgumentError);
+    expect(() =>
+      convert('2026-01-01', 'birth_date', makeColumn('date'), {
+        dateValue: 'day' as 'instant',
+      }),
+    ).toThrow("dateValue must be 'instant' or 'string'");
+  });
+});
+
 describe('type predicates', () => {
   it.each([
     ['string', true],
@@ -277,7 +454,20 @@ describe('type predicates', () => {
     ['true', 'boolean', true],
     ['yes', 'boolean', false],
     ['2026-01-01', 'date', true],
+    ['2026', 'date', false],
+    ['January 1, 2026', 'date', false],
+    ['01/02/2026', 'date', false],
     ['created_at', 'timestamp', false],
+    ['2026-01-01 00:00:00.000', 'timestamp', true],
+    ['2026-01-01T00:00:00.000Z', 'timestamp', false],
+    ['2026-01-01 00:00:00.123456', 'timestamp(6)', true],
+    ['2026-01-01 00:00:00.123456', 'timestamp(3)', false],
+    ['2026-01-01 00:00:00.000 Asia/Tokyo', 'timestamp with time zone', true],
+    ['2026-01-01 00:00:00.000 Not/AZone', 'timestamp with time zone', false],
+    ['2026-03-08 02:30:00.000 America/New_York', 'timestamp with time zone', false],
+    ['12:00:00.000', 'time(3)', true],
+    ['12:00:00.000000', 'time(6)', true],
+    ['12:00:00.000000', 'time(3)', false],
     ['Alice', 'varchar', true],
   ] as const)('isParseableAsType(%s, %s) should be %s', (value, type, expected) => {
     expect(isParseableAsType(value, type)).toBe(expected);
